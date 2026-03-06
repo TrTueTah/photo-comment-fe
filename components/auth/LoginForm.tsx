@@ -38,7 +38,6 @@ export default function LoginForm() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
-  const popupRef = useRef<Window | null>(null);
   const handledRef = useRef(false);
 
   const handleGoogleResult = useCallback(
@@ -107,20 +106,27 @@ export default function LoginForm() {
     setGoogleLoading(true);
     handledRef.current = false;
     localStorage.removeItem(STORAGE_KEY);
-    const url = getGoogleAuthUrl();
-    popupRef.current = window.open(
-      url,
+
+    window.open(
+      getGoogleAuthUrl(),
       "google-auth",
       "width=500,height=600,left=200,top=100"
     );
 
-    // Detect popup closed without completing auth
-    const checkClosed = setInterval(() => {
-      if (popupRef.current?.closed) {
-        clearInterval(checkClosed);
-        setGoogleLoading(false);
-      }
-    }, 500);
+    // COOP headers break window.closed polling, so detect popup dismissal via
+    // the focus event instead: when the main window regains focus and auth
+    // hasn't completed, the user must have closed the popup without signing in.
+    const handleFocus = () => {
+      // Small delay so the storage/message event has time to fire first if auth
+      // completed at the same moment the window was focused.
+      setTimeout(() => {
+        if (!handledRef.current) {
+          setGoogleLoading(false);
+        }
+      }, 300);
+      window.removeEventListener("focus", handleFocus);
+    };
+    window.addEventListener("focus", handleFocus);
   };
 
   return (
