@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Divider, Form, Input } from "antd";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -8,18 +8,28 @@ import { getGoogleAuthUrl, login } from "@/lib/api/auth";
 import { formatApiError } from "@/lib/api/client";
 import { useAuth } from "@/lib/auth/context";
 import { userFromToken } from "@/lib/utils/jwt";
-import type { LoginRequest, TokenPair } from "@/lib/types/api";
+import type { LoginRequest } from "@/lib/types/api";
 
 interface LoginFormValues {
   email: string;
   password: string;
 }
 
+const STORAGE_KEY = "google_auth_callback";
+
 interface GoogleAuthMessage {
   type: "GOOGLE_AUTH_SUCCESS" | "GOOGLE_AUTH_ERROR";
   accessToken?: string;
   refreshToken?: string;
   message?: string;
+}
+
+interface StoragePayload {
+  type: "success" | "error";
+  accessToken?: string;
+  refreshToken?: string;
+  message?: string;
+  ts: number;
 }
 
 export default function LoginForm() {
@@ -29,28 +39,54 @@ export default function LoginForm() {
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const popupRef = useRef<Window | null>(null);
+  const handledRef = useRef(false);
 
-  // Listen for Google OAuth popup callback
+  const handleGoogleResult = useCallback(
+    (accessToken: string | undefined, refreshToken: string | undefined, message?: string) => {
+      if (handledRef.current) return;
+      handledRef.current = true;
+      if (accessToken && refreshToken) {
+        authLogin({ accessToken, refreshToken }, userFromToken(accessToken));
+        router.replace("/feed");
+      } else {
+        setError(message ?? "Google sign-in failed. Please try again.");
+        setGoogleLoading(false);
+      }
+    },
+    [authLogin, router]
+  );
+
+  // Primary: localStorage storage event (works when window.opener is null due to COOP headers)
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key !== STORAGE_KEY || !e.newValue) return;
+      try {
+        const payload = JSON.parse(e.newValue) as StoragePayload;
+        if (Date.now() - payload.ts > 30_000) return; // ignore stale entries
+        localStorage.removeItem(STORAGE_KEY);
+        handleGoogleResult(payload.accessToken, payload.refreshToken, payload.message);
+      } catch {
+        // malformed value — ignore
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, [handleGoogleResult]);
+
+  // Secondary: postMessage (for browsers that preserve window.opener)
   useEffect(() => {
     const handleMessage = (event: MessageEvent<GoogleAuthMessage>) => {
       if (event.origin !== window.location.origin) return;
       if (event.data?.type === "GOOGLE_AUTH_SUCCESS") {
-        const { accessToken, refreshToken } = event.data;
-        if (accessToken && refreshToken) {
-          const tokens: TokenPair = { accessToken, refreshToken };
-          authLogin(tokens, userFromToken(accessToken));
-          router.replace("/feed");
-        }
-        setGoogleLoading(false);
+        localStorage.removeItem(STORAGE_KEY);
+        handleGoogleResult(event.data.accessToken, event.data.refreshToken);
       } else if (event.data?.type === "GOOGLE_AUTH_ERROR") {
-        setError(event.data.message ?? "Google sign-in failed. Please try again.");
-        setGoogleLoading(false);
+        handleGoogleResult(undefined, undefined, event.data.message);
       }
     };
-
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [authLogin, router]);
+  }, [handleGoogleResult]);
 
   const onFinish = async (values: LoginFormValues) => {
     setError(null);
@@ -69,6 +105,8 @@ export default function LoginForm() {
   const handleGoogleLogin = () => {
     setError(null);
     setGoogleLoading(true);
+    handledRef.current = false;
+    localStorage.removeItem(STORAGE_KEY);
     const url = getGoogleAuthUrl();
     popupRef.current = window.open(
       url,
